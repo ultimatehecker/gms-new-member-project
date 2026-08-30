@@ -1,3 +1,5 @@
+use std::sync::mpsc::{Sender, channel};
+
 #[derive(Debug, PartialEq)]
 enum SampleData {
     Integer(i32),
@@ -11,21 +13,24 @@ struct Sample {
     data: SampleData
 }
 
+/// Encodes a Sample into a Little Endian byte array
+/// * `sample`: A sample to encode
+/// * `buffer`: A buffer which is any amount bytes long, which is muttable to write the bytes to
 fn encode(sample: &Sample, buffer: &mut [u8]) {
     let mut i = 0;
 
-    buffer[i..i + 4].copy_from_slice(&0u32.to_le_bytes());
+    buffer[i..i + 4].copy_from_slice(&0u32.to_le_bytes()); // Add the header of four bytes of zeros
     i += 4;
 
     let string_length = sample.name.len() as u32;
-    buffer[i..i + 4].copy_from_slice(&string_length.to_le_bytes());
+    buffer[i..i + 4].copy_from_slice(&string_length.to_le_bytes()); // Add the string length to the buffer
     i += 4;
 
     let name_bytes = sample.name.as_bytes();
-    buffer[i..i + name_bytes.len()].copy_from_slice(name_bytes);
+    buffer[i..i + name_bytes.len()].copy_from_slice(name_bytes); // Add the string name to the buffer
     i += name_bytes.len();
 
-    match sample.data {
+    match sample.data { // Match between the different data types depending on the one contained in the sample
         SampleData::Integer(v) => {
             buffer[i..i + 4].copy_from_slice(&0u32.to_le_bytes());
             i += 4;
@@ -46,14 +51,18 @@ fn encode(sample: &Sample, buffer: &mut [u8]) {
     }
 }
 
+/// Decodes a Little Endian byte array back to a sample object
+/// * `buffer`: A buffer which is any amount bytes long, which contains the Little Endian
 fn decode(buffer: &[u8]) -> Result<Sample, ()> {
     let mut i = 0;
 
+    // Check if the buffer is long enough to contain the byte array
     if buffer.len() < i + 4 {
         println!("Invalid Buffer. Does not contain a valid little endian for the header");
         return Err(())
     }
 
+    // Decode the header
     let header = u32::from_le_bytes([
         buffer[i],
         buffer[i + 1],
@@ -63,16 +72,19 @@ fn decode(buffer: &[u8]) -> Result<Sample, ()> {
 
     i += 4;
 
+    // Check if the header is fully zero
     if header != 0 {
         println!("Invalid Buffer. The header must be 0, and current is {header}");
         return Err(())
     }
 
+    // Check if the buffer is long enough to contain the string length
     if buffer.len() < i + 4 {
         println!("Invalid Buffer. Does not contain a valid little endian for the string length");
         return Err(())
     }
 
+    // Decode the string length
     let string_length = u32::from_le_bytes([
         buffer[i],
         buffer[i + 1],
@@ -82,12 +94,13 @@ fn decode(buffer: &[u8]) -> Result<Sample, ()> {
 
     i += 4;
 
-
+    // Check if the buffer is long enough to contain the sample name
     if buffer.len() < i + string_length {
         println!("Invalid Buffer. Does not contain the whole string length");
         return Err(())
     }
 
+    // Decode the sample name
     let string_name = match std::str::from_utf8(&buffer[i..i + string_length]) {
         Ok(value) => value.to_string(),
         Err(_value) => return Err(())
@@ -100,6 +113,7 @@ fn decode(buffer: &[u8]) -> Result<Sample, ()> {
         return Err(())
     }
 
+    // Check if the buffer is long enough to contain the data type
     let data_type = u32::from_le_bytes([
         buffer[i],
         buffer[i + 1],
@@ -109,13 +123,14 @@ fn decode(buffer: &[u8]) -> Result<Sample, ()> {
 
     i += 4;
 
+    // Match between the different data types based on the value of the literal
     let data: SampleData = match data_type {
         0 => {
             if buffer.len() < i + 4 {
                 return Err(())
             }
 
-            let value: i32 = i32::from_le_bytes([
+            let value: i32 = i32::from_le_bytes([ // Decode the Integer value
                 buffer[i],
                 buffer[i + 1],
                 buffer[i + 2],
@@ -130,7 +145,7 @@ fn decode(buffer: &[u8]) -> Result<Sample, ()> {
                 return Err(())
             }
 
-            let value: f32 = f32::from_le_bytes([
+            let value: f32 = f32::from_le_bytes([ // Decode the Float value
                 buffer[i],
                 buffer[i + 1],
                 buffer[i + 2],
@@ -145,7 +160,7 @@ fn decode(buffer: &[u8]) -> Result<Sample, ()> {
                 return Err(())
             }
 
-            let value: bool = match buffer[i] {
+            let value: bool = match buffer[i] { // Decode the Boolean value
                 0 => false,
                 1 => true,
                 _ => {
@@ -163,95 +178,132 @@ fn decode(buffer: &[u8]) -> Result<Sample, ()> {
         }
     };
 
-    println!("Valid Buffer Received. Decoded with name of {string_name} and sample data of {data:?}");
-
     Ok(Sample {
         name: string_name,
         data: data
     })
 }
 
-fn listen() {
-    let socket = match std::net::UdpSocket::bind("127.0.0.1:5800") {
+/// Transmitter thread which handles encoding and transmitting the data to the recievers
+fn transmitter() {
+    let socket = match std::net::UdpSocket::bind("127.0.0.1:0") { // Start the transmitter socket
         Ok(socket) => socket,
         Err(error) => {
-            println!("Failed to bind UDP socket: {}", error);
+            println!("Failed to create UDP transmitter: {}", error);
             return;
         }
     };
 
-    println!("Listening on port 5800");
+    println!("Listening on port 0");
 
-    let mut buffer = [0u8; 1024];
+    // Create an array of sample that we want to send
+    let samples: [Sample; 6] = [
+        Sample { name: "acceleration".into(), data: SampleData::Float(90.7) },
+        Sample { name: "velocity".into(), data: SampleData::Float(36.9) },
+        Sample { name: "position".into(), data: SampleData::Float(113.5) },
+        Sample { name: "coolant_temperature".into(), data: SampleData::Integer(72) },
+        Sample { name: "tires_locked".into(), data: SampleData::Boolean(false) },
+        Sample { name: "motor_temp".into(), data: SampleData::Boolean(true) }
+    ];
 
-    loop {
-        let (amount, source) = match socket.recv_from(&mut buffer) {
-            Ok(result) => result,
+    // Iterate through each of the samples in the array, sending them to the receiver socket
+    for sample in samples {
+        let mut buffer: [u8; 50] = [0u8; 50];
+        encode(&sample, &mut buffer);
+
+        
+        println!("[Transmitter] Sending \"{}\": {:?}", sample.name,buffer);
+
+        match socket.send_to(&buffer, "127.0.0.1:5800") {
+            Ok(_) => {}
             Err(error) => {
-                println!("Failed to receive packet: {}", error);
-                continue;
-            }
-        };
-
-        let sample = match decode(&buffer[..amount]) {
-            Ok(sample) => sample,
-            Err(_) => {
-                println!("Received invalid sample");
-                continue;
-            }
-        };
-
-        match sample.data {
-            SampleData::Integer(value) => {
-                println!("{} {} {}", source.ip(), sample.name, value);
-            }
-
-            SampleData::Float(value) => {
-                println!("{} {} {}", source.ip(), sample.name, value);
-            }
-
-            SampleData::Boolean(value) => {
-                println!("{} {} {}", source.ip(), sample.name, value);
+                println!("[Transmitter] Failed to send \"{}\": {}", sample.name, error);
             }
         }
     }
 }
 
-fn main() {
-    std::thread::spawn(|| {
-        listen();
-    });
-
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    let socket = match std::net::UdpSocket::bind("127.0.0.1:0") {
+/// Receiver thread which handles receiving data from the transmitter, decoding the buffer, and sending it to the main thread for logging
+fn receiver(tx: Sender<Sample>) {
+    let socket = match std::net::UdpSocket::bind("127.0.0.1:5800") { // Creating the receiver socket
         Ok(socket) => socket,
         Err(error) => {
-            println!("Failed to create sender: {}", error);
+            println!("[Receiver] Failed to create UDP receiver: {}", error);
             return;
         }
     };
 
-    let sample = Sample {
-        name: "accel".into(),
-        data: SampleData::Boolean(true),
-    };
+    println!("[Receiver] Successfully started, listening on port 5800...");
 
-    let mut buffer = [0u8; 21];
+    let mut buffer = [0u8; 50]; // Create a buffer long enough to write the buffer sent from the transmitter 
 
-    encode(&sample, &mut buffer);
+    loop {
+        let (amount, source) = match socket.recv_from(&mut buffer) {
+            Ok(result) => result,
+            Err(error) => {
+                println!("[Receiver] Failed to receive packet: {}", error);
+                continue;
+            }
+        };
 
-    match socket.send_to(&buffer, "127.0.0.1:5800") {
-        Ok(amount) => {
-            println!("Sent {} bytes", amount);
-        }
+        println!("[Receiver] Received {} bytes from {}", amount, source);
 
-        Err(error) => {
-            println!("Failed to send packet: {}", error);
+        let sample = match decode(&buffer[..amount]) { // Decode the samples from the transmitter
+            Ok(sample) => sample,
+            Err(_) => {
+                println!("[Receiver] Failed to decode the receiver buffer {buffer:?}");
+                continue;
+            }
+        };
+
+        match tx.send(sample) { // Send the samples to the main thread for logging
+            Ok(_) => {}
+            Err(error) => {
+                println!("[Receiver] Failed to send sample to main: {}", error);
+                break;
+            }
         }
     }
+}
 
-    std::thread::sleep(std::time::Duration::from_millis(1000));
+/// The main thread, which is responsible for receiving samples from the receiver thread, and logging them in the console
+fn main() {
+    let (tx, rx) = channel::<Sample>(); // Create a Sender Receiver channel to send data from two threads
+
+    std::thread::spawn(|| {
+        receiver(tx);
+    });
+
+    std::thread::sleep(std::time::Duration::from_millis(1000)); // Wait to spawn the transmitter thread until the receiver has been created
+
+    std::thread::spawn(|| {
+        transmitter();
+    });
+
+    loop {
+        let sample = match rx.recv() { // Receive the sample from the receiver thread
+            Ok(sample) => sample,
+
+            Err(error) => {
+                println!("[Main] Channel closed: {}", error);
+                break;
+            }
+        };
+
+        match &sample.data { // Match for each different data type to be logged nicely
+            SampleData::Integer(value) => {
+                println!("[Main] Sample \"{}\" | Integer | {}", sample.name, value);
+            }
+
+            SampleData::Float(value) => {
+                println!("[Main] Sample \"{}\" | Float | {}", sample.name, value);
+            }
+
+            SampleData::Boolean(value) => {
+                println!("[Main] Sample \"{}\" | Boolean | {}", sample.name, value);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
