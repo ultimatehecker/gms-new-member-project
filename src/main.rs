@@ -184,48 +184,9 @@ fn decode(buffer: &[u8]) -> Result<Sample, ()> {
     })
 }
 
-/// Transmitter thread which handles encoding and transmitting the data to the recievers
-fn transmitter() {
-    let socket = match std::net::UdpSocket::bind("127.0.0.1:0") { // Start the transmitter socket
-        Ok(socket) => socket,
-        Err(error) => {
-            println!("Failed to create UDP transmitter: {}", error);
-            return;
-        }
-    };
-
-    println!("Listening on port 0");
-
-    // Create an array of sample that we want to send
-    let samples: [Sample; 6] = [
-        Sample { name: "acceleration".into(), data: SampleData::Float(90.7) },
-        Sample { name: "velocity".into(), data: SampleData::Float(36.9) },
-        Sample { name: "position".into(), data: SampleData::Float(113.5) },
-        Sample { name: "coolant_temperature".into(), data: SampleData::Integer(72) },
-        Sample { name: "tires_locked".into(), data: SampleData::Boolean(false) },
-        Sample { name: "motor_temp".into(), data: SampleData::Boolean(true) }
-    ];
-
-    // Iterate through each of the samples in the array, sending them to the receiver socket
-    for sample in samples {
-        let mut buffer: [u8; 50] = [0u8; 50];
-        encode(&sample, &mut buffer);
-
-        
-        println!("[Transmitter] Sending \"{}\": {:?}", sample.name,buffer);
-
-        match socket.send_to(&buffer, "127.0.0.1:5800") {
-            Ok(_) => {}
-            Err(error) => {
-                println!("[Transmitter] Failed to send \"{}\": {}", sample.name, error);
-            }
-        }
-    }
-}
-
 /// Receiver thread which handles receiving data from the transmitter, decoding the buffer, and sending it to the main thread for logging
 fn receiver(tx: Sender<Sample>) {
-    let socket = match std::net::UdpSocket::bind("127.0.0.1:5800") { // Creating the receiver socket
+    let socket = match std::net::UdpSocket::bind("10.0.0.1:34254") { // Creating the receiver socket
         Ok(socket) => socket,
         Err(error) => {
             println!("[Receiver] Failed to create UDP receiver: {}", error);
@@ -239,7 +200,10 @@ fn receiver(tx: Sender<Sample>) {
 
     loop {
         let (amount, source) = match socket.recv_from(&mut buffer) {
-            Ok(result) => result,
+            Ok(result) => {
+                println!("Work pls");
+                result
+            }
             Err(error) => {
                 println!("[Receiver] Failed to receive packet: {}", error);
                 continue;
@@ -272,12 +236,6 @@ fn main() {
 
     std::thread::spawn(|| {
         receiver(tx);
-    });
-
-    std::thread::sleep(std::time::Duration::from_millis(1000)); // Wait to spawn the transmitter thread until the receiver has been created
-
-    std::thread::spawn(|| {
-        transmitter();
     });
 
     loop {
